@@ -382,6 +382,13 @@
           updateSelectedPanel();
         });
 
+        network.on('doubleClick', params => {
+          if (!params.nodes.length) return;
+          const node = graph.nodes[params.nodes[0]];
+          if (!node) return;
+          openSpotifyArtistSearch(node.label);
+        });
+
         network.on('dragStart', params => {
           if (params.nodes.length) stopPhysics();
         });
@@ -511,20 +518,66 @@
         const node = graph.nodes[nodeId];
         if (!node || node.imageUrl) return;
 
-        const url = new URL('https://ws.audioscrobbler.com/2.0/');
-        url.searchParams.set('method', 'artist.getinfo');
-        url.searchParams.set('artist', node.label);
-        url.searchParams.set('api_key', apiKey);
-        url.searchParams.set('format', 'json');
-
-        try {
-          const response = await fetch(url.toString());
-          if (!response.ok) return;
-          const data = await response.json();
-          node.imageUrl = getBestImage(data?.artist?.image) || null;
-        } catch {
-          node.imageUrl = null;
+        const wikiImage = await fetchWikipediaImage(node.label);
+        if (wikiImage) {
+          node.imageUrl = wikiImage;
+          node.imageSource = 'Wikipedia';
+          return;
         }
+
+        const lastFmImage = await fetchLastFmImage(node.label, apiKey);
+        if (lastFmImage) {
+          node.imageUrl = lastFmImage;
+          node.imageSource = 'Last.fm';
+        }
+      }
+
+      async function fetchWikipediaImage(artistName) {
+        try {
+          const searchUrl = new URL('https://en.wikipedia.org/w/api.php');
+          searchUrl.searchParams.set('origin', '*');
+          searchUrl.searchParams.set('action', 'query');
+          searchUrl.searchParams.set('format', 'json');
+          searchUrl.searchParams.set('generator', 'search');
+          searchUrl.searchParams.set('gsrsearch', `${artistName} musician OR band OR rapper OR singer`);
+          searchUrl.searchParams.set('gsrlimit', '1');
+          searchUrl.searchParams.set('prop', 'pageimages');
+          searchUrl.searchParams.set('piprop', 'thumbnail');
+          searchUrl.searchParams.set('pithumbsize', '320');
+
+          const response = await fetch(searchUrl.toString());
+          if (!response.ok) return null;
+          const data = await response.json();
+          const pages = data?.query?.pages;
+          if (!pages) return null;
+          const firstPage = Object.values(pages)[0];
+          return firstPage?.thumbnail?.source || null;
+        } catch {
+          return null;
+        }
+      }
+
+      async function fetchLastFmImage(artistName, apiKey) {
+        try {
+          const url = new URL('https://ws.audioscrobbler.com/2.0/');
+          url.searchParams.set('method', 'artist.getinfo');
+          url.searchParams.set('artist', artistName);
+          url.searchParams.set('api_key', apiKey);
+          url.searchParams.set('format', 'json');
+
+          const response = await fetch(url.toString());
+          if (!response.ok) return null;
+          const data = await response.json();
+          return getBestImage(data?.artist?.image) || null;
+        } catch {
+          return null;
+        }
+      }
+
+      function openSpotifyArtistSearch(artistName) {
+        const url = `https://open.spotify.com/search/${encodeURIComponent(artistName)}/artists`;
+        window.open(url, '_blank', 'noopener,noreferrer');
+        log(`Spotify geopend voor: ${artistName}`);
       }
 
       function ensureNode(label, defaults = {}) {
@@ -539,12 +592,14 @@
             discoveredFrom: defaults.discoveredFrom || null,
             match: defaults.match ?? null,
             imageUrl: defaults.imageUrl || null,
+            imageSource: defaults.imageUrl ? 'Last.fm' : null,
             manualPosition: false,
             createdAt: new Date().toISOString()
           };
         } else {
           graph.nodes[id].label = graph.nodes[id].label || label;
           graph.nodes[id].imageUrl = graph.nodes[id].imageUrl || defaults.imageUrl || null;
+          graph.nodes[id].imageSource = graph.nodes[id].imageSource || (defaults.imageUrl ? 'Last.fm' : null);
           graph.nodes[id].match = graph.nodes[id].match ?? defaults.match ?? null;
         }
         return id;
@@ -725,7 +780,7 @@
           <div>Generatie: ${node.generation}</div>
           ${parent ? `<div>Ontdekt via: ${escapeHtml(parent.label)}</div>` : ''}
           ${node.match !== null ? `<div>Last.fm match: ${Number(node.match).toFixed(2)}</div>` : ''}
-          ${node.imageUrl ? '<div>Afbeelding: gevonden</div>' : '<div>Afbeelding: fallback badge</div>'}
+          ${node.imageUrl ? `<div>Afbeelding: gevonden${node.imageSource ? ` via ${escapeHtml(node.imageSource)}` : ''}</div>` : '<div>Afbeelding: fallback badge</div>'}
           <div class="pill-row">
             <span class="pill">${escapeHtml(node.type)}</span>
             <span class="pill">gen ${node.generation}</span>
@@ -818,6 +873,7 @@
           node.discoveredFrom = node.discoveredFrom || null;
           node.match = node.match === undefined ? null : node.match;
           node.imageUrl = node.imageUrl || null;
+          node.imageSource = node.imageSource || null;
           node.manualPosition = Boolean(node.manualPosition);
         });
 
@@ -1001,3 +1057,4 @@
   </script>
 </body>
 </html>
+
