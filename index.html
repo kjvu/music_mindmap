@@ -104,6 +104,13 @@
     button.danger { background: var(--danger); color: white; }
     button:disabled { opacity: 0.5; cursor: not-allowed; }
 
+    button.active {
+      background: linear-gradient(135deg, #d49a54, #ffe0a3);
+      color: #18100a;
+      box-shadow: 0 0 0 2px rgba(230,195,106,0.28), 0 0 18px rgba(230,195,106,0.18);
+      border-color: rgba(255,240,181,0.75);
+    }
+
     .row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
     #network { width: 100%; height: 100vh; position: relative; z-index: 1; }
 
@@ -215,6 +222,12 @@
     </div>
 
     <div class="card">
+      <h2>Delen</h2>
+      <button id="shareLinkBtn" class="secondary">Maak deelbare link</button>
+      <div id="shareInfo" class="small" style="margin-top:8px;">Deel je muziekpad via een link. API keys worden niet meegedeeld.</div>
+    </div>
+
+    <div class="card">
       <h2>Opslag</h2>
       <button id="exportBtn" class="secondary">Exporteer JSON</button>
       <label for="importBox">Importeer JSON</label>
@@ -246,6 +259,9 @@
         'music_map_lastfm_api_key_stable_v1'
       ];
 
+      // DEMO / fallback API key (shared use)
+      const FALLBACK_API_KEY = 'ab89e215aa34d078952d810b6710b1e6';
+
       const els = {
         apiKey: document.getElementById('apiKey'),
         artistInput: document.getElementById('artistInput'),
@@ -259,11 +275,14 @@
         chooseBtn: document.getElementById('chooseBtn'),
         saveBtn: document.getElementById('saveBtn'),
         rejectBtn: document.getElementById('rejectBtn'),
+        shareLinkBtn: document.getElementById('shareLinkBtn'),
+        shareInfo: document.getElementById('shareInfo'),
         exportBtn: document.getElementById('exportBtn'),
         importBox: document.getElementById('importBox'),
         importBtn: document.getElementById('importBtn'),
         log: document.getElementById('log'),
-        network: document.getElementById('network')
+        network: document.getElementById('network'),
+        demoBadge: null
       };
 
       let graph = loadGraph();
@@ -322,9 +341,11 @@
       renderGraph(false);
       updateSelectedPanel();
       runSelfCheck();
+      handleIncomingShare();
       log(Object.keys(graph.nodes).length ? 'Bestaande kaart geladen.' : 'Lege kaart geladen.');
 
       function bindEvents() {
+        createDemoBadge();
         els.apiKey.addEventListener('input', () => {
           localStorage.setItem(API_KEY, els.apiKey.value.trim());
         });
@@ -346,9 +367,10 @@
           await addOrExpandArtist(node.label, node.id, false);
         });
 
-        els.chooseBtn.addEventListener('click', () => setStatus('chosen'));
+        els.chooseBtn.addEventListener('click', () => toggleChosen());
         els.saveBtn.addEventListener('click', () => setStatus('saved'));
         els.rejectBtn.addEventListener('click', () => setStatus('rejected'));
+        els.shareLinkBtn.addEventListener('click', () => createShareLink());
         els.clearBtn.addEventListener('click', () => clearMap(true));
         els.resetPositionsBtn.addEventListener('click', () => resetPositions());
         els.hardResetBtn.addEventListener('click', () => hardReset(true));
@@ -484,6 +506,7 @@
             );
           });
 
+          await enrichVisibleImages(apiKey);
           await enrichVisibleTopAlbums(apiKey);
 
           placeGraph(currentId);
@@ -516,6 +539,12 @@
         const artists = data?.similarartists?.artist;
         if (!artists) return [];
         return Array.isArray(artists) ? artists : [artists];
+      }
+
+      async function enrichVisibleImages(apiKey) {
+        const visibleNodes = Object.values(graph.nodes).filter(node => !node.imageUrl);
+        const batch = visibleNodes.slice(0, 8);
+        await Promise.all(batch.map(node => enrichArtistImage(node.id, apiKey)));
       }
 
       async function enrichVisibleTopAlbums(apiKey) {
@@ -726,22 +755,91 @@
         });
       }
 
+      function toggleChosen() {
+        const node = selectedNode();
+        if (!node) return;
+
+        if (graph.mainPath.includes(node.id) || node.status === 'chosen') {
+          unchooseNode(node.id);
+        } else {
+          chooseNode(node.id);
+        }
+      }
+
+      function chooseNode(nodeId) {
+        const node = graph.nodes[nodeId];
+        if (!node) return;
+        node.status = 'chosen';
+        node.statusChangedAt = new Date().toISOString();
+
+        if (node.discoveredFrom) {
+          promoteToMainPath(node.discoveredFrom, node.id);
+          ensureEdge(node.discoveredFrom, node.id, 'chosen-expansion', null, buildChosenReason(node.discoveredFrom, node.id));
+        } else if (!graph.mainPath.includes(node.id)) {
+          graph.mainPath.push(node.id);
+        }
+
+        placeGraph(node.id);
+        saveGraph();
+        renderGraph(true);
+        updateSelectedPanel();
+        log(`${node.label} gemarkeerd als gekozen.`);
+      }
+
+      function unchooseNode(nodeId) {
+        const node = graph.nodes[nodeId];
+        if (!node) return;
+
+        const removedPathNodes = new Set();
+        const nodeIndex = graph.mainPath.indexOf(nodeId);
+        if (nodeIndex >= 0) {
+          graph.mainPath.slice(nodeIndex).forEach(id => removedPathNodes.add(id));
+          graph.mainPath = graph.mainPath.slice(0, nodeIndex);
+        } else {
+          removedPathNodes.add(nodeId);
+          graph.mainPath = graph.mainPath.filter(id => id !== nodeId);
+        }
+
+        graph.edges = graph.edges.filter(edge => {
+          if (edge.relation !== 'chosen-expansion') return true;
+          return !(removedPathNodes.has(edge.from) || removedPathNodes.has(edge.to));
+        });
+
+        removedPathNodes.forEach(id => {
+          const item = graph.nodes[id];
+          if (!item) return;
+          item.status = item.status === 'chosen' ? 'suggested' : item.status;
+          delete item.mainPathIndex;
+        });
+
+        graph.mainPath.forEach((id, index) => {
+          if (!graph.nodes[id]) return;
+          graph.nodes[id].status = 'chosen';
+          graph.nodes[id].mainPathIndex = index;
+        });
+
+        placeGraph(nodeId);
+        saveGraph();
+        renderGraph(true);
+        updateSelectedPanel();
+        log(`${node.label} uit de hoofdlijn gehaald.`);
+      }
+
       function setStatus(status) {
         const node = selectedNode();
         if (!node) return;
+        if (status === 'chosen') {
+          chooseNode(node.id);
+          return;
+        }
+
         node.status = status;
         node.statusChangedAt = new Date().toISOString();
 
-        if (status === 'chosen') {
-          if (node.discoveredFrom) {
-            promoteToMainPath(node.discoveredFrom, node.id);
-            ensureEdge(node.discoveredFrom, node.id, 'chosen-expansion', null, buildChosenReason(node.discoveredFrom, node.id));
-          } else if (!graph.mainPath.includes(node.id)) {
-            graph.mainPath.push(node.id);
-          }
+        if (graph.mainPath.includes(node.id)) {
+          unchooseNode(node.id);
+          node.status = status;
         }
-
-        if (status !== 'chosen') graph.mainPath = graph.mainPath.filter(id => id !== node.id);
 
         placeGraph(node.id);
         saveGraph();
@@ -860,8 +958,12 @@
         const node = selectedNode();
         const disabled = !node;
         [els.expandBtn, els.chooseBtn, els.saveBtn, els.rejectBtn].forEach(button => button.disabled = disabled);
+        els.chooseBtn.classList.toggle('active', Boolean(node && (graph.mainPath.includes(node.id) || node.status === 'chosen')));
+        els.chooseBtn.textContent = node && (graph.mainPath.includes(node.id) || node.status === 'chosen') ? 'Gekozen ✓ / klik om los te maken' : 'Markeer gekozen';
 
         if (!node) {
+          els.chooseBtn.classList.remove('active');
+          els.chooseBtn.textContent = 'Markeer gekozen';
           els.selectedInfo.innerHTML = 'Klik op een node in de kaart.';
           return;
         }
@@ -884,6 +986,120 @@
             ${node.manualPosition ? '<span class="pill">handmatig geplaatst</span>' : ''}
           </div>
         `;
+      }
+
+      function createShareLink() {
+        const shareGraph = makeShareGraph(graph);
+        if (!Object.keys(shareGraph.nodes).length) {
+          alert('Er is nog geen muziekpad om te delen. Voeg eerst een artiest toe.');
+          return;
+        }
+
+        const encoded = encodeSharePayload(shareGraph);
+        const url = `${window.location.origin}${window.location.pathname}#map=${encoded}`;
+
+        copyText(url).then(() => {
+          els.shareInfo.textContent = `Deelbare link gekopieerd. Lengte: ${url.length} tekens.`;
+          log('Deelbare link gekopieerd naar je klembord.');
+        }).catch(() => {
+          els.importBox.value = url;
+          els.shareInfo.textContent = 'Klembord niet beschikbaar; link staat in het import/export veld.';
+          log('Deelbare link in het tekstveld geplaatst.');
+        });
+      }
+
+      function handleIncomingShare() {
+        const hash = window.location.hash || '';
+        if (!hash.startsWith('#map=')) return;
+
+        try {
+          const encoded = hash.slice(5);
+          const sharedGraph = normalizeGraph(decodeSharePayload(encoded));
+          const nodeCount = Object.keys(sharedGraph.nodes).length;
+          const edgeCount = sharedGraph.edges.length;
+          if (!nodeCount) return;
+
+          const shouldImport = confirm(`Gedeelde muziekmap gevonden met ${nodeCount} nodes en ${edgeCount} lijnen. Wil je deze importeren? Dit vervangt je huidige kaart op dit apparaat.`);
+          if (!shouldImport) {
+            log('Gedeelde muziekmap genegeerd.');
+            return;
+          }
+
+          graph = sharedGraph;
+          selectedNodeId = null;
+          saveGraph();
+          renderGraph(false);
+          updateSelectedPanel();
+          log('Gedeelde muziekmap geïmporteerd.');
+
+          history.replaceState(null, document.title, window.location.pathname + window.location.search);
+        } catch (err) {
+          console.error(err);
+          log('Gedeelde link kon niet worden gelezen: ' + err.message);
+          alert('Deze gedeelde muziekmap kon niet worden gelezen.');
+        }
+      }
+
+      function makeShareGraph(source) {
+        const clean = normalizeGraph(source);
+        const shared = emptyGraph();
+
+        Object.entries(clean.nodes).forEach(([id, node]) => {
+          shared.nodes[id] = {
+            id: node.id,
+            label: node.label,
+            type: node.type,
+            status: node.status,
+            generation: node.generation,
+            discoveredFrom: node.discoveredFrom,
+            match: node.match,
+            imageUrl: node.imageUrl,
+            imageSource: node.imageSource,
+            topAlbumTitle: node.topAlbumTitle,
+            topAlbumPlaycount: node.topAlbumPlaycount,
+            topAlbumUrl: node.topAlbumUrl,
+            manualPosition: node.manualPosition,
+            x: node.x,
+            y: node.y,
+            mainPathIndex: node.mainPathIndex
+          };
+        });
+
+        shared.edges = clean.edges.map(edge => ({
+          id: edge.id,
+          from: edge.from,
+          to: edge.to,
+          relation: edge.relation,
+          match: edge.match,
+          reason: edge.reason
+        }));
+
+        shared.mainPath = [...clean.mainPath];
+        return shared;
+      }
+
+      function encodeSharePayload(payload) {
+        const json = JSON.stringify(payload);
+        const utf8 = new TextEncoder().encode(json);
+        let binary = '';
+        utf8.forEach(byte => binary += String.fromCharCode(byte));
+        return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+      }
+
+      function decodeSharePayload(encoded) {
+        const padded = encoded.replace(/-/g, '+').replace(/_/g, '/') + '='.repeat((4 - encoded.length % 4) % 4);
+        const binary = atob(padded);
+        const bytes = Uint8Array.from(binary, char => char.charCodeAt(0));
+        const json = new TextDecoder().decode(bytes);
+        return JSON.parse(json);
+      }
+
+      async function copyText(text) {
+        if (navigator.clipboard?.writeText) {
+          await navigator.clipboard.writeText(text);
+          return;
+        }
+        throw new Error('Clipboard API niet beschikbaar');
       }
 
       function clearMap(ask = true) {
@@ -931,6 +1147,15 @@
             if (key) break;
           }
         }
+
+        if (!key) {
+          key = FALLBACK_API_KEY;
+          log('DEMO mode actief — fallback API key wordt gebruikt.');
+          showDemoIndicator(true);
+        } else {
+          showDemoIndicator(false);
+        }
+
         if (key) localStorage.setItem(API_KEY, key);
         els.apiKey.value = key;
       }
@@ -1176,6 +1401,32 @@ Dubbelklik: open topalbum in Spotify`;
         console.log('Graph:', graph);
         return debug;
       };
+
+      function createDemoBadge() {
+        const badge = document.createElement('div');
+        badge.id = 'demoBadge';
+        badge.style.position = 'absolute';
+        badge.style.top = '14px';
+        badge.style.right = '16px';
+        badge.style.zIndex = '5';
+        badge.style.padding = '6px 10px';
+        badge.style.borderRadius = '999px';
+        badge.style.fontSize = '11px';
+        badge.style.letterSpacing = '0.4px';
+        badge.style.background = 'rgba(212,154,84,0.18)';
+        badge.style.border = '1px solid rgba(212,154,84,0.4)';
+        badge.style.color = '#f0efe8';
+        badge.style.backdropFilter = 'blur(6px)';
+        badge.style.display = 'none';
+        badge.textContent = 'DEMO MODE';
+        document.body.appendChild(badge);
+        els.demoBadge = badge;
+      }
+
+      function showDemoIndicator(show) {
+        if (!els.demoBadge) return;
+        els.demoBadge.style.display = show ? 'block' : 'none';
+      }
 
       function log(message) {
         const now = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
