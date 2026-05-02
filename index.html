@@ -575,9 +575,19 @@
       }
 
       function openSpotifyArtistSearch(artistName) {
-        const url = `https://open.spotify.com/search/${encodeURIComponent(artistName)}/artists`;
-        window.open(url, '_blank', 'noopener,noreferrer');
-        log(`Spotify geopend voor: ${artistName}`);
+        const encoded = encodeURIComponent(artistName);
+        const appUrl = `spotify:search:${encoded}`;
+        const webUrl = `https://open.spotify.com/search/${encoded}/artists`;
+
+        // On Android/iOS/desktop this first tries to open the Spotify app.
+        // If the app link is blocked or Spotify is not installed, it falls back to the web player.
+        window.location.href = appUrl;
+
+        setTimeout(() => {
+          window.open(webUrl, '_blank', 'noopener,noreferrer');
+        }, 900);
+
+        log(`Spotify-app geprobeerd voor: ${artistName}`);
       }
 
       function ensureNode(label, defaults = {}) {
@@ -1057,4 +1067,3 @@
   </script>
 </body>
 </html>
-
