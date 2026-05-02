@@ -917,8 +917,33 @@
         const from = graph.nodes[fromId]?.label || 'deze artiest';
         const to = graph.nodes[toId]?.label || 'deze suggestie';
         const score = Number(match || 0);
+
         const strength = score >= 0.75 ? 'sterke' : score >= 0.45 ? 'redelijke' : 'lichte';
-        return `${to} is aangeboden als ${strength} Last.fm-match op ${from}.\nMatchscore: ${score.toFixed(2)} · suggestie #${index + 1}.`;
+
+        const vibePhrases = [
+          `${to} ligt duidelijk in het verlengde van ${from}`,
+          `${to} deelt hoorbare invloeden met ${from}`,
+          `${to} zit in dezelfde muzikale hoek als ${from}`,
+          `${to} voelt als een natuurlijke zijstap vanuit ${from}`,
+          `${to} sluit aan op de sound van ${from}`,
+          `${to} raakt een vergelijkbare sfeer als ${from}`
+        ];
+
+        const nuancePhrases = [
+          'verwacht vergelijkbare ritmes of productiekeuzes',
+          'mogelijk overlap in stijl of periode',
+          'kans op gedeelde invloeden of scene',
+          'interessant als je de vibe wilt verdiepen',
+          'kan dezelfde luisterflow verlengen',
+          'vaak gelinkt door luistergedrag van anderen'
+        ];
+
+        const vibe = vibePhrases[index % vibePhrases.length];
+        const nuance = nuancePhrases[(index + Math.round(score * 10)) % nuancePhrases.length];
+
+        return `${vibe}.
+${nuance}.
+${strength} match · score: ${score.toFixed(2)}`;
       }
 
       function buildChosenReason(fromId, toId) {
