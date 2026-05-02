@@ -382,11 +382,12 @@
           updateSelectedPanel();
         });
 
-        network.on('doubleClick', params => {
+        network.on('doubleClick', async params => {
           if (!params.nodes.length) return;
           const node = graph.nodes[params.nodes[0]];
           if (!node) return;
-          openSpotifyArtistSearch(node.label);
+          await ensureTopAlbum(node.id);
+          openSpotifyTopAlbum(node);
         });
 
         network.on('dragStart', params => {
@@ -441,6 +442,7 @@
           }
 
           await enrichArtistImage(currentId, apiKey);
+          await enrichArtistTopAlbum(currentId, apiKey);
           placeGraph(currentId);
           saveGraph();
           renderGraph(true);
@@ -482,6 +484,8 @@
             );
           });
 
+          await enrichVisibleTopAlbums(apiKey);
+
           placeGraph(currentId);
           saveGraph();
           renderGraph(true);
@@ -512,6 +516,62 @@
         const artists = data?.similarartists?.artist;
         if (!artists) return [];
         return Array.isArray(artists) ? artists : [artists];
+      }
+
+      async function enrichVisibleTopAlbums(apiKey) {
+        const visibleNodes = Object.values(graph.nodes).filter(node => !node.topAlbumTitle);
+        const batch = visibleNodes.slice(0, 8);
+        await Promise.all(batch.map(node => enrichArtistTopAlbum(node.id, apiKey)));
+      }
+
+      async function ensureTopAlbum(nodeId) {
+        const node = graph.nodes[nodeId];
+        if (!node || node.topAlbumTitle) return;
+        const apiKey = els.apiKey.value.trim();
+        if (!apiKey) return;
+        await enrichArtistTopAlbum(nodeId, apiKey);
+        saveGraph();
+        renderGraph(false);
+        updateSelectedPanel();
+      }
+
+      async function enrichArtistTopAlbum(nodeId, apiKey) {
+        const node = graph.nodes[nodeId];
+        if (!node || node.topAlbumTitle) return;
+
+        try {
+          const album = await fetchLastFmTopAlbum(node.label, apiKey);
+          if (!album) return;
+          node.topAlbumTitle = album.title;
+          node.topAlbumPlaycount = album.playcount;
+          node.topAlbumUrl = album.url;
+        } catch {
+          // Non-critical. Tooltip simply shows that no album data is available yet.
+        }
+      }
+
+      async function fetchLastFmTopAlbum(artistName, apiKey) {
+        const url = new URL('https://ws.audioscrobbler.com/2.0/');
+        url.searchParams.set('method', 'artist.gettopalbums');
+        url.searchParams.set('artist', artistName);
+        url.searchParams.set('api_key', apiKey);
+        url.searchParams.set('format', 'json');
+        url.searchParams.set('limit', '1');
+
+        const response = await fetch(url.toString());
+        if (!response.ok) return null;
+        const data = await response.json();
+        if (data.error) return null;
+
+        const albums = data?.topalbums?.album;
+        const top = Array.isArray(albums) ? albums[0] : albums;
+        if (!top?.name) return null;
+
+        return {
+          title: top.name,
+          playcount: top.playcount ? Number(top.playcount) : null,
+          url: top.url || null
+        };
       }
 
       async function enrichArtistImage(nodeId, apiKey) {
@@ -574,13 +634,32 @@
         }
       }
 
+      function openSpotifyTopAlbum(node) {
+        if (!node.topAlbumTitle) {
+          openSpotifyArtistSearch(node.label);
+          log(`Geen topalbum bekend; Spotify artist search geopend voor: ${node.label}`);
+          return;
+        }
+
+        const query = `${node.label} ${node.topAlbumTitle}`;
+        const encoded = encodeURIComponent(query);
+        const appUrl = `spotify:search:${encoded}`;
+        const webUrl = `https://open.spotify.com/search/${encoded}/albums`;
+
+        window.location.href = appUrl;
+
+        setTimeout(() => {
+          window.open(webUrl, '_blank', 'noopener,noreferrer');
+        }, 900);
+
+        log(`Spotify album-search geprobeerd voor: ${node.label} — ${node.topAlbumTitle}`);
+      }
+
       function openSpotifyArtistSearch(artistName) {
         const encoded = encodeURIComponent(artistName);
         const appUrl = `spotify:search:${encoded}`;
         const webUrl = `https://open.spotify.com/search/${encoded}/artists`;
 
-        // On Android/iOS/desktop this first tries to open the Spotify app.
-        // If the app link is blocked or Spotify is not installed, it falls back to the web player.
         window.location.href = appUrl;
 
         setTimeout(() => {
@@ -603,6 +682,9 @@
             match: defaults.match ?? null,
             imageUrl: defaults.imageUrl || null,
             imageSource: defaults.imageUrl ? 'Last.fm' : null,
+            topAlbumTitle: null,
+            topAlbumPlaycount: null,
+            topAlbumUrl: null,
             manualPosition: false,
             createdAt: new Date().toISOString()
           };
@@ -611,6 +693,9 @@
           graph.nodes[id].imageUrl = graph.nodes[id].imageUrl || defaults.imageUrl || null;
           graph.nodes[id].imageSource = graph.nodes[id].imageSource || (defaults.imageUrl ? 'Last.fm' : null);
           graph.nodes[id].match = graph.nodes[id].match ?? defaults.match ?? null;
+          graph.nodes[id].topAlbumTitle = graph.nodes[id].topAlbumTitle || null;
+          graph.nodes[id].topAlbumPlaycount = graph.nodes[id].topAlbumPlaycount || null;
+          graph.nodes[id].topAlbumUrl = graph.nodes[id].topAlbumUrl || null;
         }
         return id;
       }
@@ -791,6 +876,7 @@
           ${parent ? `<div>Ontdekt via: ${escapeHtml(parent.label)}</div>` : ''}
           ${node.match !== null ? `<div>Last.fm match: ${Number(node.match).toFixed(2)}</div>` : ''}
           ${node.imageUrl ? `<div>Afbeelding: gevonden${node.imageSource ? ` via ${escapeHtml(node.imageSource)}` : ''}</div>` : '<div>Afbeelding: fallback badge</div>'}
+          ${node.topAlbumTitle ? `<div>Topalbum: <strong>${escapeHtml(node.topAlbumTitle)}</strong></div>` : '<div>Topalbum: nog niet opgehaald</div>'}
           <div class="pill-row">
             <span class="pill">${escapeHtml(node.type)}</span>
             <span class="pill">gen ${node.generation}</span>
@@ -884,6 +970,9 @@
           node.match = node.match === undefined ? null : node.match;
           node.imageUrl = node.imageUrl || null;
           node.imageSource = node.imageSource || null;
+          node.topAlbumTitle = node.topAlbumTitle || null;
+          node.topAlbumPlaycount = node.topAlbumPlaycount || null;
+          node.topAlbumUrl = node.topAlbumUrl || null;
           node.manualPosition = Boolean(node.manualPosition);
         });
 
@@ -962,7 +1051,15 @@ ${strength} match · score: ${score.toFixed(2)}`;
 
       function makeNodeTooltip(node) {
         const parent = node.discoveredFrom && graph.nodes[node.discoveredFrom] ? graph.nodes[node.discoveredFrom].label : 'startpunt';
-        return `${node.label}\nStatus: ${node.status}\nGeneratie: ${node.generation}\nVia: ${parent}`;
+        const albumLine = node.topAlbumTitle
+          ? `Meest geluisterde album: ${node.topAlbumTitle}${node.topAlbumPlaycount ? ` (${formatNumber(node.topAlbumPlaycount)} plays op Last.fm)` : ''}`
+          : 'Meest geluisterde album: nog niet opgehaald';
+        return `${node.label}
+${albumLine}
+Status: ${node.status}
+Generatie: ${node.generation}
+Via: ${parent}
+Dubbelklik: open topalbum in Spotify`;
       }
 
       function getBestImage(images) {
@@ -1020,6 +1117,10 @@ ${strength} match · score: ${score.toFixed(2)}`;
         return 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
       }
 
+      function formatNumber(value) {
+        return new Intl.NumberFormat('nl-NL').format(Number(value));
+      }
+
       function setBusy(isBusy) {
         els.startBtn.disabled = isBusy;
         els.expandBtn.disabled = isBusy || !selectedNode();
@@ -1068,7 +1169,8 @@ ${strength} match · score: ${score.toFixed(2)}`;
           mainPath: graph.mainPath.map(id => graph.nodes[id]?.label || id),
           selectedNodeId,
           graphKey: GRAPH_KEY,
-          apiKeyPresent: Boolean(els.apiKey.value.trim())
+          apiKeyPresent: Boolean(els.apiKey.value.trim()),
+          topAlbumKnown: selectedNodeId ? graph.nodes[selectedNodeId]?.topAlbumTitle || null : null
         };
         console.table(debug);
         console.log('Graph:', graph);
